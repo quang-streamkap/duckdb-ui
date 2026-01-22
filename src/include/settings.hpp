@@ -6,7 +6,7 @@
 #define UI_LOCAL_PORT_SETTING_NAME "ui_local_port"
 #define UI_LOCAL_PORT_SETTING_DEFAULT 4213
 #define UI_LOCAL_HOST_SETTING_NAME "ui_local_host"
-#define UI_LOCAL_HOST_SETTING_DEFAULT "localhost"
+#define UI_LOCAL_HOST_SETTING_DEFAULT "0.0.0.0"
 #define UI_REMOTE_URL_SETTING_NAME "ui_remote_url"
 #define UI_REMOTE_URL_SETTING_DEFAULT "https://ui.duckdb.org"
 #define UI_POLLING_INTERVAL_SETTING_NAME "ui_polling_interval"

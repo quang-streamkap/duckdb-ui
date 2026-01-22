@@ -45,12 +45,52 @@ For more usage details, see the [documentation](https://duckdb.org/docs/stable/c
 
 ## Configuration
 
+### Prerequisites
+
+Before configuring extension settings, ensure the UI extension is loaded. The steps depend on how DuckDB is started:
+
+**For loadable extensions (Docker, installed extensions):**
+
+1. Start DuckDB with the `-unsigned` flag to enable unsigned extensions:
+   ```bash
+   duckdb -unsigned
+   ```
+   
+   Or using Docker:
+   ```bash
+   docker run --rm -it -v "$(pwd):/workspace" -w /workspace --net host --entrypoint duckdb duckdb/duckdb -unsigned
+   ```
+   
+   Or using Docker Compose (see `docker-compose.yml`):
+   ```bash
+   docker-compose run --rm duckdb
+   ```
+
+2. Once DuckDB is running, install and load the extension:
+   ```sql
+   INSTALL ui;
+   LOAD ui;
+   ```
+
+   **Important:** The `-unsigned` flag already enables unsigned extensions at startup. You **do not need** (and cannot) set `allow_unsigned_extensions = true` at runtime. If you see an error about "Cannot change allow_unsigned_extensions setting while database is running", simply ignore it and proceed with installing/loading the extension - the flag has already enabled it.
+
+   **Note:** If the `ui_local_host` setting is not available after loading the extension, the published extension version may not include this feature yet. In that case, you'll need to build the extension from source (see the "Extension" section above) and use a statically linked build, or wait for an updated extension release.
+
+3. After loading the extension, the settings (like `ui_local_host`) will be available:
+   ```sql
+   SET ui_local_host = '0.0.0.0';
+   ```
+
+**For statically linked builds:**
+
+If you're using a custom build where the extension is statically linked (like `./build/release/duckdb`), the extension and its settings are automatically available without needing to install/load it.
+
 ### Listening Interface
 
-By default, the UI server listens on `localhost` (127.0.0.1), which restricts access to local connections only. You can configure the listening interface to allow connections from other machines:
+By default, the UI server listens on `0.0.0.0`, which allows connections from all network interfaces. You can configure the listening interface to restrict access:
 
 ```sql
-SET ui_local_host = '0.0.0.0';  -- Listen on all interfaces
+SET ui_local_host = 'localhost';  -- Listen only on localhost (127.0.0.1)
 ```
 
 Or bind to a specific IP address:
@@ -59,7 +99,15 @@ Or bind to a specific IP address:
 SET ui_local_host = '192.168.1.100';  -- Listen on specific IP
 ```
 
-The default value is `'localhost'` for security. Use `'0.0.0.0'` to allow connections from any network interface, or specify a particular IP address to bind to a specific interface.
+The default value is `'0.0.0.0'` to allow connections from any network interface. Use `'localhost'` to restrict access to local connections only, or specify a particular IP address to bind to a specific interface.
+
+**Troubleshooting:** If you get an "unrecognized configuration parameter" error, verify the extension is loaded by checking if the `start_ui()` function is available:
+
+```sql
+SELECT start_ui();
+```
+
+If this fails, the extension is not loaded. For loadable extensions, ensure you've run `INSTALL ui;` and `LOAD ui;` first.
 
 ## User Interface Packages
 
