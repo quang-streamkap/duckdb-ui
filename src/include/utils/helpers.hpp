@@ -1,8 +1,18 @@
 #pragma once
 
 #include <duckdb.hpp>
+#ifndef DUCKDB_CPP_EXTENSION_ENTRY
 #include <duckdb/main/extension_util.hpp>
+#endif
 #include <type_traits>
+
+// TODO we cannot run these checks because they are not defined for DuckDB < 1.4.x
+// #ifndef DUCKDB_MAJOR_VERSION
+// #error "DUCKDB_MAJOR_VERSION is not defined"
+// ...
+#define DUCKDB_VERSION_AT_MOST(major, minor, patch)                                                                    \
+	(DUCKDB_MAJOR_VERSION < (major) || (DUCKDB_MAJOR_VERSION == (major) && DUCKDB_MINOR_VERSION < (minor)) ||          \
+	 (DUCKDB_MAJOR_VERSION == (major) && DUCKDB_MINOR_VERSION == (minor) && DUCKDB_PATCH_VERSION <= (patch)))
 
 namespace duckdb {
 
@@ -64,6 +74,15 @@ void TableFunc(ClientContext &context, TableFunctionInput &input,
   output.SetValue(0, 0, result);
 }
 
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+template <typename Func, Func func>
+void RegisterTF(ExtensionLoader &loader, const char *name) {
+  TableFunction tf(name, {}, internal::TableFunc<Func, func>,
+                   internal::SingleStringResultBind,
+                   RunOnceTableFunctionState::Init);
+  loader.RegisterFunction(tf);
+}
+#else
 template <typename Func, Func func>
 void RegisterTF(DatabaseInstance &instance, const char *name) {
   TableFunction tf(name, {}, internal::TableFunc<Func, func>,
@@ -71,10 +90,16 @@ void RegisterTF(DatabaseInstance &instance, const char *name) {
                    RunOnceTableFunctionState::Init);
   ExtensionUtil::RegisterFunction(instance, tf);
 }
+#endif
 
 } // namespace internal
 
-#define RESISTER_TF(name, func)                                                \
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+#define REGISTER_TF(name, func)                                                \
+  internal::RegisterTF<decltype(&func), &func>(loader, name)
+#else
+#define REGISTER_TF(name, func)                                                \
   internal::RegisterTF<decltype(&func), &func>(instance, name)
+#endif
 
 } // namespace duckdb

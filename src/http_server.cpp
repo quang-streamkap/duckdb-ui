@@ -9,9 +9,15 @@
 #include "utils/serialization.hpp"
 #include "version.hpp"
 #include "watcher.hpp"
+#if DUCKDB_MAJOR_VERSION == 1 && DUCKDB_MINOR_VERSION == 5
+#include <duckdb/common/enums/database_modification_type.hpp>
+#endif
+#include <duckdb/common/http_util.hpp>
 #include <duckdb/common/serializer/binary_serializer.hpp>
 #include <duckdb/common/serializer/memory_stream.hpp>
 #include <duckdb/main/attached_database.hpp>
+#include <duckdb/main/client_data.hpp>
+#include <duckdb/parser/parsed_data/create_table_info.hpp>
 #include <duckdb/parser/parser.hpp>
 
 namespace duckdb {
@@ -96,14 +102,18 @@ const HttpServer &HttpServer::Start(ClientContext &context, bool *was_started) {
   const auto remote_url = GetRemoteUrl(context);
   const auto port = GetLocalPort(context);
   const auto host = GetLocalHost(context);
+  auto &http_util = HTTPUtil::Get(*context.db);
+  // FIXME - https://github.com/duckdb/duckdb/pull/17655 will remove `unused`
+  auto http_params = http_util.InitializeParameters(context, "unused");
   auto server = GetInstance(context);
-  server->DoStart(port, host, remote_url);
+  server->DoStart(port, host, remote_url, std::move(http_params));
   return *server;
 }
 
 void HttpServer::DoStart(const uint16_t _local_port,
                          const std::string &_local_host,
-                         const std::string &_remote_url) {
+                         const std::string &_remote_url,
+                         unique_ptr<HTTPParams> _http_params) {
   if (Started()) {
     throw std::runtime_error("HttpServer already started");
   }
@@ -112,6 +122,7 @@ void HttpServer::DoStart(const uint16_t _local_port,
   local_host = _local_host;
   local_url = StringUtil::Format("http://%s:%d", local_host, local_port);
   remote_url = _remote_url;
+  http_params = std::move(_http_params);
   user_agent =
       StringUtil::Format("duckdb-ui/%s-%s(%s)", DuckDB::LibraryVersion(),
                          UI_EXTENSION_VERSION, DuckDB::Platform());
@@ -131,16 +142,18 @@ bool HttpServer::Stop() {
 }
 
 void HttpServer::DoStop() {
-  if (event_dispatcher) {
-    event_dispatcher->Close();
-    event_dispatcher = nullptr;
-  }
-  server.stop();
-
+  // First stop the watcher (since it needs a valid event dispatcher and server)
   if (watcher) {
     watcher->Stop();
     watcher = nullptr;
   }
+
+  // Then, stop the event dispatcher
+  if (event_dispatcher) {
+    event_dispatcher->Close();
+  }
+
+  server.stop();
 
   if (main_thread) {
     main_thread->join();
@@ -148,6 +161,8 @@ void HttpServer::DoStop() {
   }
 
   ddb_instance.reset();
+  http_params = nullptr;
+  event_dispatcher = nullptr;
   remote_url = "";
   local_port = 0;
   local_host = "";
@@ -206,7 +221,7 @@ void HttpServer::HandleGetLocalEvents(const httplib::Request &req,
                                       httplib::Response &res) {
   res.set_chunked_content_provider(
       "text/event-stream", [&](size_t /*offset*/, httplib::DataSink &sink) {
-        if (event_dispatcher->WaitEvent(&sink)) {
+        if (event_dispatcher && event_dispatcher->WaitEvent(&sink)) {
           return true;
         }
 
@@ -245,27 +260,52 @@ void HttpServer::HandleGetLocalToken(const httplib::Request &req,
   }
 }
 
+// Adapted from
+// https://github.com/duckdb/duckdb/blob/1f8b6839ea7864c3e3fb020574f67384cb58124c/src/main/http/http_util.cpp#L129-L147
+// Which is not currently exposed.
+void HttpServer::InitClientFromParams(httplib::Client &client) {
+  auto sec = static_cast<time_t>(http_params->timeout);
+  auto usec = static_cast<time_t>(http_params->timeout_usec);
+  client.set_keep_alive(true);
+  client.set_write_timeout(sec, usec);
+  client.set_read_timeout(sec, usec);
+  client.set_connection_timeout(sec, usec);
+
+  if (!http_params->http_proxy.empty()) {
+    client.set_proxy(http_params->http_proxy,
+                     static_cast<int>(http_params->http_proxy_port));
+
+    if (!http_params->http_proxy_username.empty()) {
+      client.set_proxy_basic_auth(http_params->http_proxy_username,
+                                  http_params->http_proxy_password);
+    }
+  }
+}
+
 void HttpServer::HandleGet(const httplib::Request &req,
                            httplib::Response &res) {
   // Create HTTP client to remote URL
   // TODO: Can this be created once and shared?
   httplib::Client client(remote_url);
-  client.set_keep_alive(true);
+  InitClientFromParams(client);
 
-  // Provide a way to turn on or off server certificate verification, at least
-  // for now, because it requires httplib to correctly get the root certficates
-  // on each platform, which doesn't appear to always work. Currently, default
-  // to no verification, until we understand when it breaks things.
-  if (IsEnvEnabled("ui_enable_server_certificate_verification")) {
-    client.enable_server_certificate_verification(true);
-  } else {
+  if (IsEnvEnabled("ui_disable_server_certificate_verification")) {
     client.enable_server_certificate_verification(false);
   }
 
+  httplib::Headers headers = {{"User-Agent", user_agent}};
+  auto cookie = req.get_header_value("Cookie");
+  if (!cookie.empty()) {
+    headers.emplace("Cookie", cookie);
+  }
+
   // forward GET to remote URL
-  auto result = client.Get(req.path, req.params, {{"User-Agent", user_agent}});
+  auto result = client.Get(req.path, req.params, headers);
   if (!result) {
     res.status = 500;
+    res.set_content("Could not fetch: '" + req.path + "' from '" + remote_url +
+                        "': " + to_string(result.error()),
+                    "text/plain");
     return;
   }
 
@@ -280,6 +320,9 @@ void HttpServer::HandleGet(const httplib::Request &req,
     // Wasm).
     res.set_header("X-DuckDB-UI-Extension-Version", UI_EXTENSION_VERSION);
   }
+
+  // httplib will set Content-Length, remove it so it is not duplicated.
+  res.headers.erase("Content-Length");
 }
 
 void HttpServer::HandleInterrupt(const httplib::Request &req,
@@ -334,20 +377,50 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
 
   auto connection_name = req.get_header_value("X-DuckDB-UI-Connection-Name");
 
-  auto database_name =
+  auto database_name_option =
       DecodeBase64(req.get_header_value("X-DuckDB-UI-Database-Name"));
+  auto schema_name_option =
+      DecodeBase64(req.get_header_value("X-DuckDB-UI-Schema-Name"));
 
   std::vector<std::string> parameter_values;
   auto parameter_count_string =
       req.get_header_value("X-DuckDB-UI-Parameter-Count");
   if (!parameter_count_string.empty()) {
     auto parameter_count = std::stoi(parameter_count_string);
-    for (idx_t i = 0; i < parameter_count; ++i) {
+    for (auto i = 0; i < parameter_count; ++i) {
       auto parameter_value = DecodeBase64(req.get_header_value(
           StringUtil::Format("X-DuckDB-UI-Parameter-Value-%d", i)));
       parameter_values.push_back(parameter_value);
     }
   }
+
+  // default to effectively no limit
+  auto result_row_limit = INT_MAX;
+  auto result_row_limit_string =
+      req.get_header_value("X-DuckDB-UI-Result-Row-Limit");
+  if (!result_row_limit_string.empty()) {
+    result_row_limit = std::stoi(result_row_limit_string);
+  }
+
+  auto result_database_name_option =
+      DecodeBase64(req.get_header_value("X-DuckDB-UI-Result-Database-Name"));
+  auto result_schema_name_option =
+      DecodeBase64(req.get_header_value("X-DuckDB-UI-Result-Schema-Name"));
+  auto result_table_name =
+      DecodeBase64(req.get_header_value("X-DuckDB-UI-Result-Table-Name"));
+
+  // If no result table is specified, then the result table row limit is zero.
+  // Otherwise, default to effectively no limit.
+  auto result_table_row_limit = result_table_name.empty() ? 0 : INT_MAX;
+  auto result_table_row_limit_string =
+      req.get_header_value("X-DuckDB-UI-Result-Table-Row-Limit");
+  // Only set the result table row limit if a result table name is specified.
+  if (!result_table_name.empty() && !result_table_row_limit_string.empty()) {
+    result_table_row_limit = std::stoi(result_table_row_limit_string);
+  }
+
+  auto errors_as_json_string =
+      req.get_header_value("X-DuckDB-UI-Errors-As-JSON");
 
   std::string content = ReadContent(content_reader);
 
@@ -361,15 +434,81 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
   auto connection =
       UIStorageExtensionInfo::GetState(*db).FindOrCreateConnection(
           *db, connection_name);
+  auto &context = *connection->context;
+  auto &config = ClientConfig::GetConfig(context);
 
-  // Set current database if optional header is provided.
-  if (!database_name.empty()) {
-    auto &context = *connection->context;
+  // Set errors_as_json
+  if (!errors_as_json_string.empty()) {
+    config.errors_as_json = errors_as_json_string == "true";
+  }
+
+  // Set current database & schema
+  if (!database_name_option.empty() || !schema_name_option.empty()) {
+    // It's fine if the database name is empty, but we need a valid schema name.
+    auto schema_name =
+        schema_name_option.empty() ? DEFAULT_SCHEMA : schema_name_option;
     context.RunFunctionInTransaction([&] {
-      auto &manager = context.db->GetDatabaseManager();
-      manager.SetDefaultDatabase(context, database_name);
+      duckdb::ClientData::Get(context).catalog_search_path->Set(
+          {database_name_option, schema_name},
+          duckdb::CatalogSetPathType::SET_SCHEMA);
     });
   }
+
+  vector<unique_ptr<SQLStatement>> statements;
+  try {
+    statements = connection->ExtractStatements(content);
+  } catch (std::exception &ex) {
+    ErrorData error(ex);
+    SetResponseErrorResult(res, error.RawMessage());
+    return;
+  }
+
+  auto statement_count = statements.size();
+
+  if (statement_count == 0) {
+    SetResponseErrorResult(res, "No statements");
+    return;
+  }
+
+  // If there's more than one statement, run all but the last.
+  if (statement_count > 1) {
+    for (size_t i = 0; i < statement_count - 1; ++i) {
+      auto pending = connection->PendingQuery(std::move(statements[i]), true);
+      // Return any error found before execution.
+      if (pending->HasError()) {
+        SetResponseErrorResult(res, pending->GetError());
+        return;
+      }
+      // Execute tasks until result is ready (or there's an error).
+      auto exec_result = PendingExecutionResult::RESULT_NOT_READY;
+      while (!PendingQueryResult::IsResultReady(exec_result)) {
+        exec_result = pending->ExecuteTask();
+        if (exec_result == PendingExecutionResult::BLOCKED ||
+            exec_result == PendingExecutionResult::NO_TASKS_AVAILABLE) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      // Return any error found during execution.
+      switch (exec_result) {
+      case PendingExecutionResult::EXECUTION_ERROR:
+        SetResponseErrorResult(res, pending->GetError());
+        return;
+      case PendingExecutionResult::EXECUTION_FINISHED:
+      case PendingExecutionResult::RESULT_READY:
+        // ignore the result
+        pending->Execute();
+        break;
+      default:
+        SetResponseErrorResult(
+            res, StringUtil::Format("Unexpected PendingExecutionResult: %s",
+                                    exec_result));
+        return;
+      }
+    }
+  }
+
+  // Get the last statement.
+  auto &statement_to_run = statements[statement_count - 1];
 
   // We use a pending query so we can execute tasks and fetch chunks
   // incrementally. This enables cancellation.
@@ -377,7 +516,7 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
 
   // Create pending query, with request content as SQL.
   if (parameter_values.size() > 0) {
-    auto prepared = connection->Prepare(content);
+    auto prepared = connection->Prepare(std::move(statement_to_run));
     if (prepared->HasError()) {
       SetResponseErrorResult(res, prepared->GetError());
       return;
@@ -390,7 +529,7 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
     }
     pending = prepared->PendingQuery(values, true);
   } else {
-    pending = connection->PendingQuery(content, true);
+    pending = connection->PendingQuery(std::move(statement_to_run), true);
   }
 
   if (pending->HasError()) {
@@ -419,17 +558,92 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
     // Get the result. This should be quick because it's ready.
     auto result = pending->Execute();
 
+    // We use a separate connection for the appender, including creating the
+    // result table, because we still need to fetch chunks from the pending
+    // query on the user's connection.
+    unique_ptr<duckdb::Connection> appender_connection;
+    unique_ptr<duckdb::Appender> appender;
+
+    if (!result_table_name.empty()) {
+      auto result_database_name = result_database_name_option.empty()
+                                      ? "memory"
+                                      : result_database_name_option;
+      auto result_schema_name = result_schema_name_option.empty()
+                                    ? "main"
+                                    : result_schema_name_option;
+
+      auto result_table_info = make_uniq<duckdb::CreateTableInfo>(
+          result_database_name, result_schema_name, result_table_name);
+      for (idx_t i = 0; i < result->names.size(); i++) {
+        result_table_info->columns.AddColumn(
+            ColumnDefinition(result->names[i], result->types[i]));
+      }
+
+      appender_connection = make_uniq<duckdb::Connection>(*db);
+      auto appender_context = appender_connection->context;
+      appender_context->RunFunctionInTransaction([&] {
+        auto &catalog = duckdb::Catalog::GetCatalog(*appender_context,
+                                                    result_database_name);
+#if DUCKDB_MAJOR_VERSION == 1 && DUCKDB_MINOR_VERSION == 5
+        MetaTransaction::Get(*appender_context)
+            .ModifyDatabase(catalog.GetAttached(),
+                            DatabaseModificationType::CREATE_CATALOG_ENTRY);
+#else
+        MetaTransaction::Get(*appender_context)
+            .ModifyDatabase(catalog.GetAttached());
+#endif
+        catalog.CreateTable(*appender_context, std::move(result_table_info));
+      });
+
+      appender = make_uniq<duckdb::Appender>(
+          *appender_connection, result_database_name, result_schema_name,
+          result_table_name);
+    }
+
     // Fetch the chunks and serialize the result.
     SuccessResult success_result;
     success_result.column_names_and_types = {std::move(result->names),
                                              std::move(result->types)};
 
-    // TODO: support limiting the number of chunks fetched
-    auto chunk = result->Fetch();
-    while (chunk) {
-      success_result.chunks.push_back(
-          {static_cast<uint16_t>(chunk->size()), std::move(chunk->data)});
+    auto row_limit = std::max(result_row_limit, result_table_row_limit);
+    auto rows_fetched = 0;
+    auto rows_appended = 0;
+    auto rows_in_result = 0;
+    unique_ptr<duckdb::DataChunk> chunk;
+    while (rows_fetched < row_limit) {
       chunk = result->Fetch();
+      if (!chunk) {
+        break;
+      }
+      rows_fetched += chunk->size();
+      if (appender && rows_appended < result_table_row_limit) {
+        duckdb::DataChunk *chunk_to_append = chunk.get();
+        duckdb::DataChunk chunk_prefix;
+        const idx_t rows_left = result_table_row_limit - rows_appended;
+        if (chunk->size() > rows_left) {
+          HttpServer::CopyAndSlice(*chunk, chunk_prefix, rows_left);
+          chunk_to_append = &chunk_prefix;
+        }
+        appender->AppendDataChunk(*chunk_to_append);
+        rows_appended += chunk_to_append->size();
+      }
+      if (rows_in_result < result_row_limit) {
+        duckdb::DataChunk *chunk_to_add = chunk.get();
+        duckdb::DataChunk chunk_prefix;
+        const idx_t rows_left = result_row_limit - rows_in_result;
+        if (chunk->size() > rows_left) {
+          HttpServer::CopyAndSlice(*chunk, chunk_prefix, rows_left);
+          chunk_to_add = &chunk_prefix;
+        }
+        success_result.chunks.push_back(
+            {static_cast<uint16_t>(chunk_to_add->size()),
+             std::move(chunk_to_add->data)});
+        rows_in_result += chunk_to_add->size();
+      }
+    }
+
+    if (appender) {
+      appender->Close();
     }
 
     MemoryStream success_response_content;
@@ -438,7 +652,9 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
     break;
   }
   default:
-    SetResponseErrorResult(res, "Unexpected PendingExecutionResult");
+    SetResponseErrorResult(
+        res, StringUtil::Format("Unexpected PendingExecutionResult: %s",
+                                exec_result));
     break;
   }
 }
@@ -505,6 +721,13 @@ void HttpServer::SetResponseErrorResult(httplib::Response &res,
   MemoryStream response_content;
   BinarySerializer::Serialize(error_result, response_content);
   SetResponseContent(res, response_content);
+}
+
+void HttpServer::CopyAndSlice(duckdb::DataChunk &source,
+                              duckdb::DataChunk &target, idx_t row_count) {
+  target.InitializeEmpty(source.GetTypes());
+  target.Reference(source);
+  target.Slice(0, row_count);
 }
 
 } // namespace ui

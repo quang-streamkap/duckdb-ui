@@ -9,6 +9,8 @@ set(TARGET_NAME ui)
 # from vcpkg.json to prevent needlessly installing it..
 find_package(OpenSSL REQUIRED)
 
+include_directories(${OPENSSL_INCLUDE_DIR})
+
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 
 project(${TARGET_NAME})
@@ -26,6 +28,10 @@ set(EXTENSION_SOURCES
     src/utils/md_helpers.cpp
     src/utils/serialization.cpp
     src/watcher.cpp)
+
+add_definitions(-DDUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})
+add_definitions(-DDUCKDB_MINOR_VERSION=${DUCKDB_MINOR_VERSION})
+add_definitions(-DDUCKDB_PATCH_VERSION=${DUCKDB_PATCH_VERSION})
 
 find_package(Git)
 if(NOT Git_FOUND)
@@ -54,6 +60,7 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto)
 
 install(
   TARGETS ${EXTENSION_NAME}

@@ -13,6 +13,7 @@
 
 #ifdef _WIN32
 #define OPEN_COMMAND "start"
+#undef CreateDirectory // avoid being transformed to `CreateDirectoryA`
 #elif __linux__
 #define OPEN_COMMAND "xdg-open"
 #else
@@ -55,6 +56,15 @@ std::string StopUIServerFunction(ClientContext &context) {
                                 : "UI server already stopped";
 }
 
+std::string GetUIURLFunction(ClientContext &context) {
+  if (!ui::HttpServer::Started()) {
+    throw ExecutorException("UI server not started");
+  }
+
+  auto server = ui::HttpServer::GetInstance(context);
+  return server->LocalUrl();
+}
+
 void IsUIStartedTableFunc(ClientContext &context, TableFunctionInput &input,
                           DataChunk &output) {
   if (!internal::ShouldRun(input)) {
@@ -72,7 +82,12 @@ void InitStorageExtension(duckdb::DatabaseInstance &db) {
   config.storage_extensions[STORAGE_EXTENSION_KEY] = std::move(ext);
 }
 
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+static void LoadInternal(ExtensionLoader &loader) {
+  auto &instance = loader.GetDatabaseInstance();
+#else
 static void LoadInternal(DatabaseInstance &instance) {
+#endif
   InitStorageExtension(instance);
 
   // If the server is already running we need to update the database instance
@@ -119,18 +134,28 @@ static void LoadInternal(DatabaseInstance &instance) {
         LogicalType::UINTEGER, Value::UINTEGER(def));
   }
 
-  RESISTER_TF("start_ui", StartUIFunction);
-  RESISTER_TF("start_ui_server", StartUIServerFunction);
-  RESISTER_TF("stop_ui_server", StopUIServerFunction);
+  REGISTER_TF("start_ui", StartUIFunction);
+  REGISTER_TF("start_ui_server", StartUIServerFunction);
+  REGISTER_TF("stop_ui_server", StopUIServerFunction);
+  REGISTER_TF("get_ui_url", GetUIURLFunction);
   {
     TableFunction tf("ui_is_started", {}, IsUIStartedTableFunc,
                      internal::SingleBoolResultBind,
                      RunOnceTableFunctionState::Init);
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+    loader.RegisterFunction(tf);
+#else
     ExtensionUtil::RegisterFunction(instance, tf);
+#endif
   }
 }
 
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+void UiExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
+#else
 void UiExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
+#endif
+
 std::string UiExtension::Name() { return "ui"; }
 
 std::string UiExtension::Version() const { return UI_EXTENSION_VERSION; }
@@ -139,10 +164,14 @@ std::string UiExtension::Version() const { return UI_EXTENSION_VERSION; }
 
 extern "C" {
 
+#ifdef DUCKDB_CPP_EXTENSION_ENTRY
+DUCKDB_CPP_EXTENSION_ENTRY(ui, loader) { duckdb::LoadInternal(loader); }
+#else
 DUCKDB_EXTENSION_API void ui_init(duckdb::DatabaseInstance &db) {
   duckdb::DuckDB db_wrapper(db);
   db_wrapper.LoadExtension<duckdb::UiExtension>();
 }
+#endif
 
 DUCKDB_EXTENSION_API const char *ui_version() {
   return duckdb::DuckDB::LibraryVersion();
