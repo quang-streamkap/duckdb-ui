@@ -43,6 +43,24 @@ call start_ui();
 
 For more usage details, see the [documentation](https://duckdb.org/docs/stable/core_extensions/ui.html).
 
+## Configuration
+
+### Listening Interface
+
+By default, the UI server listens on `localhost` (127.0.0.1), which restricts access to local connections only. You can configure the listening interface to allow connections from other machines:
+
+```sql
+SET ui_local_host = '0.0.0.0';  -- Listen on all interfaces
+```
+
+Or bind to a specific IP address:
+
+```sql
+SET ui_local_host = '192.168.1.100';  -- Listen on specific IP
+```
+
+The default value is `'localhost'` for security. Use `'0.0.0.0'` to allow connections from any network interface, or specify a particular IP address to bind to a specific interface.
+
 ## User Interface Packages
 
 Some packages used by the browser-based user interface can be found in the `ts` directory.
