@@ -70,7 +70,7 @@ bool HttpServer::IsRunningOnMachine(ClientContext &context) {
   }
 
   const auto local_port = GetLocalPort(context);
-  auto local_url = StringUtil::Format("http://localhost:%d", local_port);
+  auto local_url = StringUtil::Format("http://0.0.0.0:%d", local_port);
 
   httplib::Client client(local_url);
   return client.Get("/info");
@@ -116,7 +116,7 @@ void HttpServer::DoStart(const uint16_t _local_port,
   }
 
   local_port = _local_port;
-  local_url = StringUtil::Format("http://localhost:%d", local_port);
+  local_url = StringUtil::Format("http://0.0.0.0:%d", local_port);
   remote_url = _remote_url;
   http_params = std::move(_http_params);
   user_agent =
@@ -164,7 +164,7 @@ void HttpServer::DoStop() {
 }
 
 std::string HttpServer::LocalUrl() const {
-  return StringUtil::Format("http://localhost:%d/", local_port);
+  return StringUtil::Format("http://0.0.0.0:%d/", local_port);
 }
 
 shared_ptr<DatabaseInstance> HttpServer::LockDatabaseInstance() {
