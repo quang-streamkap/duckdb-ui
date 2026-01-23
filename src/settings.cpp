@@ -5,9 +5,11 @@
 namespace duckdb {
 
 std::string GetRemoteUrl(const ClientContext &context) {
+#if !(DUCKDB_MAJOR_VERSION == 1 && DUCKDB_MINOR_VERSION == 5)
   if (!context.db->config.options.allow_unsigned_extensions) {
     return UI_REMOTE_URL_SETTING_DEFAULT;
   }
+#endif
   return internal::GetSetting<std::string>(context, UI_REMOTE_URL_SETTING_NAME);
 }
 

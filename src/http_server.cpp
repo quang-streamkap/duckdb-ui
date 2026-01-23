@@ -200,7 +200,7 @@ void HttpServer::Run() {
                   const httplib::ContentReader &content_reader) {
                 HandleTokenize(req, res, content_reader);
               });
-  server.listen("localhost", local_port);
+  server.listen("0.0.0.0", local_port);
 }
 
 void HttpServer::HandleGetInfo(const httplib::Request &req,
@@ -433,9 +433,11 @@ void HttpServer::DoHandleRun(const httplib::Request &req,
   auto &config = ClientConfig::GetConfig(context);
 
   // Set errors_as_json
+#if !(DUCKDB_MAJOR_VERSION == 1 && DUCKDB_MINOR_VERSION == 5)
   if (!errors_as_json_string.empty()) {
     config.errors_as_json = errors_as_json_string == "true";
   }
+#endif
 
   // Set current database & schema
   if (!database_name_option.empty() || !schema_name_option.empty()) {
