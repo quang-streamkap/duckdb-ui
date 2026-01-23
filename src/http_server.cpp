@@ -70,7 +70,9 @@ bool HttpServer::IsRunningOnMachine(ClientContext &context) {
   }
 
   const auto local_port = GetLocalPort(context);
-  auto local_url = StringUtil::Format("http://0.0.0.0:%d", local_port);
+  auto scheme = GetEnvOrDefault("ui_local_scheme", "http");
+  auto host = GetEnvOrDefault("ui_local_host", "localhost");
+  auto local_url = StringUtil::Format("%s://%s:%d", scheme, host, local_port);
 
   httplib::Client client(local_url);
   return client.Get("/info");
@@ -116,7 +118,10 @@ void HttpServer::DoStart(const uint16_t _local_port,
   }
 
   local_port = _local_port;
-  local_url = StringUtil::Format("http://0.0.0.0:%d", local_port);
+  // Use environment variables for scheme and host configuration
+  auto scheme = GetEnvOrDefault("ui_local_scheme", "http");
+  auto host = GetEnvOrDefault("ui_local_host", "localhost");
+  local_url = StringUtil::Format("%s://%s:%d", scheme, host, local_port);
   remote_url = _remote_url;
   http_params = std::move(_http_params);
   user_agent =
@@ -164,7 +169,9 @@ void HttpServer::DoStop() {
 }
 
 std::string HttpServer::LocalUrl() const {
-  return StringUtil::Format("http://0.0.0.0:%d/", local_port);
+  auto scheme = GetEnvOrDefault("ui_local_scheme", "http");
+  auto host = GetEnvOrDefault("ui_local_host", "localhost");
+  return StringUtil::Format("%s://%s:%d/", scheme, host, local_port);
 }
 
 shared_ptr<DatabaseInstance> HttpServer::LockDatabaseInstance() {

@@ -1,0 +1,11 @@
+services:
+  duckdb-ui:
+    build:
+      context: ../..
+      dockerfile: releases/docker/Dockerfile
+    ports:
+      - "4213:4213"
+    volumes:
+      - ./data:/data
+    stdin_open: true
+    tty: true
